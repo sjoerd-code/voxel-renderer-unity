@@ -134,7 +134,7 @@ float3 VoxelNormal(float3 hitpos, float3 vcoord)
 float3 PerVoxelNormal(float3 coord)
 {
     float3 normal = float3(0, 0, 0);
-    int samplesize = 3;
+    int samplesize = 5;
     float t = samplesize / 2;
     
     for (int x = 0; x < samplesize; x++)
