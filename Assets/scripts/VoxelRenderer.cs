@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-public class VoxelRendererTexture : MonoBehaviour
+public class VoxelRenderer : MonoBehaviour
 {
     private Camera mainCamera;
     private ComputeBuffer mouseVoxelCoord;
@@ -16,6 +16,7 @@ public class VoxelRendererTexture : MonoBehaviour
     public Texture hdri;
     public int renderDistance = 1000;
     public int rayBounces = 2;
+    private float sculptSpeed = 30;
 
     private void OnEnable()
     {
@@ -30,6 +31,9 @@ public class VoxelRendererTexture : MonoBehaviour
         // generate voxel data
         data = GenChunkData();
         data.Apply();
+
+        // enable voxel sculpting
+        InvokeRepeating("SculptVoxelData", 0, 1 / sculptSpeed);
     }
 
     private void OnDisable()
@@ -37,9 +41,9 @@ public class VoxelRendererTexture : MonoBehaviour
         mouseVoxelCoord.Release();
     }
 
-    private void Update()
+    private void Tic()
     {
-        if (Input.GetMouseButton(0)) SculptVoxelData();
+         SculptVoxelData();
     }
     
     private void OnRenderImage(RenderTexture source, RenderTexture destination)
@@ -108,6 +112,8 @@ public class VoxelRendererTexture : MonoBehaviour
 
     void SculptVoxelData()
     {
+        if (!Input.GetMouseButton(0)) return;
+
         List<Vector3Int> voxelsToRemove = new List<Vector3Int>();
 
         int radius = 20;

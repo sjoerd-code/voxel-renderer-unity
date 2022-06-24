@@ -191,7 +191,7 @@ void VoxelAABB(Ray ray, inout RayHit bestHit, float3 Vcoord, half type, float3 g
         // set lighting data for each voxel type
         if (type == 1)
         {
-            bestHit.albedo = bestHit.normal;
+            bestHit.albedo = (bestHit.normal + 1) / 2;
             bestHit.specular = 0.1f;
         }
         else
