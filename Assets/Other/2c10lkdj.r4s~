@@ -1,0 +1,448 @@
+#pragma kernel CSMain
+
+float4x4 _CameraToWorld;
+float4x4 _CameraInverseProjection;
+Texture2D<float4> _SkyboxTexture;
+SamplerState my_point_clamp_sampler;
+SamplerState sampler_SkyboxTexture;
+static const float PI = 3.14159265f;
+float3 _DirectionalLight;
+float _rayBounces;
+float _renderdistance;
+float2 _mousePos;
+float2 _Pixel;
+RWStructuredBuffer<float> _MouseVoxelCoord;
+float3 CamPos;
+RWTexture2D<float4> Result;
+RWTexture2D<float> DepthBuffer;
+float3 _ChunkPos;
+float _ChunkSize;
+float _ChunksPerAxis;
+Texture3D<half> _VoxelData;
+SamplerState sampler_VoxelData;
+
+// get voxel data at voxel coord
+half GetVoxelDataAtVoxelCoord(int3 position)
+{
+    if (position.x < 0 || position.y < 0 || position.z < 0 || position.x > _ChunkSize - 1 || position.y > _ChunkSize - 1 || position.z > _ChunkSize - 1)
+    {
+        return 0;
+    }
+    float3 uv = position / _ChunkSize;
+    return _VoxelData.SampleLevel(sampler_VoxelData, uv, 0).x;
+}
+
+// check if voxel is empty
+bool EmptyVoxel(int3 pos)
+{
+    half value = GetVoxelDataAtVoxelCoord(pos);
+
+    if (pos.x < 0 || pos.y < 0 || pos.z < 0 || pos.x > _ChunkSize - 1 || pos.y > _ChunkSize - 1 || pos.z > _ChunkSize - 1)
+    {
+        return true;
+    }
+
+    if (value <= 0)
+    {
+        return true;
+    }
+    else 
+    {
+        return false;
+    }
+}
+
+// ray structs and initializers
+struct Ray
+{
+    float3 origin;
+    float3 direction;
+    float3 energy;
+};
+Ray CreateRay(float3 origin, float3 direction)
+{
+    Ray ray;
+    ray.origin = origin;
+    ray.direction = direction;
+    ray.energy = float3(1.0f, 1.0f, 1.0f);
+    return ray;
+}
+Ray CreateCameraRay(float2 uv)
+{
+    float3 origin = mul(_CameraToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+    float3 direction = mul(_CameraInverseProjection, float4(uv, 0.0f, 1.0f)).xyz;
+    direction = mul(_CameraToWorld, float4(direction, 0.0f)).xyz;
+    direction = normalize(direction);
+    return CreateRay(origin, direction);
+}
+struct RayHit
+{
+    float3 position;
+    float distance; 
+    float3 normal;
+    float3 albedo;
+    float3 specular;
+    float3 Localvcoord;
+    float3 Worldvcoord;
+};
+RayHit CreateRayHit()
+{
+    RayHit hit;
+    hit.position = float3(0.0f, 0.0f, 0.0f);
+    hit.distance = _renderdistance;
+    hit.normal = float3(0.0f, 0.0f, 0.0f);
+    hit.albedo = float3(0.0f, 0.0f, 0.0f);
+    hit.specular = float3(0.0f, 0.0f, 0.0f);
+    hit.Localvcoord = float3(0.0f, 0.0f, 0.0f);
+    hit.Worldvcoord = float3(0.0f, 0.0f, 0.0f);
+    return hit;
+}
+
+// (Voxel Space) get normals for each 6 sides of voxels
+float3 VoxelNormal(float3 hitpos, float3 vcoord)
+{
+    float3 normal = float3(0, 0, 0);
+    float epsilon = 0.0001f;
+
+    float3 hitposP = floor(hitpos + epsilon);
+    float3 localP = hitposP - vcoord;
+
+    if (localP.x == 1)
+        normal.x = 1;
+
+    if (localP.y == 1)
+        normal.y = 1;
+
+    if (localP.z == 1)
+        normal.z = 1;
+
+    float3 hitposN = floor(hitpos - epsilon);
+    float3 localN = hitposN - vcoord;
+
+    if (localN.x == -1)
+        normal.x = -1;
+
+    if (localN.y == -1)
+        normal.y = -1;
+
+    if (localN.z == -1)
+        normal.z = -1;
+
+    
+    return normal;
+}
+
+// (Chunk Space) get a single normal for all rays that hit the normals based on neighbouring voxels data
+float3 PerVoxelNormal(float3 coord)
+{
+    float3 normal = float3(0, 0, 0);
+    int samplesize = 3;
+    float t = samplesize / 2;
+    
+    for (int x = 0; x < samplesize; x++)
+    {
+        for (int y = 0; y < samplesize; y++)
+        {
+            for (int z = 0; z < samplesize; z++)
+            {
+                float a = x - t;
+                float b = y - t;
+                float c = z - t;
+                if (EmptyVoxel(float3(coord.x + a, coord.y + b, coord.z + c))) 
+                {
+                    normal += float3(a, b, c);
+                }
+            }
+        }
+    }
+
+    return normalize(normal);
+}
+
+// does ray intersect a voxel, then set the rays shading properties?
+void VoxelAABB(Ray ray, inout RayHit bestHit, float3 Vcoord, half type, float3 gridmin)
+{
+    // scale from local to world space
+    Vcoord = Vcoord + _ChunkPos * _ChunkSize;
+
+    float t1 = (Vcoord.x - ray.origin.x) / ray.direction.x;
+    float t2 = (Vcoord.x + 1 - ray.origin.x) / ray.direction.x;
+    float t3 = (Vcoord.y - ray.origin.y) / ray.direction.y;
+    float t4 = (Vcoord.y + 1 - ray.origin.y) / ray.direction.y;
+    float t5 = (Vcoord.z - ray.origin.z) / ray.direction.z;
+    float t6 = (Vcoord.z + 1 - ray.origin.z) / ray.direction.z;
+    float aMin = t1 < t2 ? t1 : t2;
+    float bMin = t3 < t4 ? t3 : t4;
+    float cMin = t5 < t6 ? t5 : t6;
+    float aMax = t1 > t2 ? t1 : t2;
+    float bMax = t3 > t4 ? t3 : t4;
+    float cMax = t5 > t6 ? t5 : t6;
+    float fMax = aMin > bMin ? aMin : bMin;
+    float fMin = aMax < bMax ? aMax : bMax;
+    float t7 = fMax > cMin ? fMax : cMin;
+    float t8 = fMin < cMax ? fMin : cMax;
+    float t9 = (t8 < 0 || t7 > t8) ? -1 : t7;
+
+    // intersection found, pass on infomation
+    if (t9 > 0 && t9 < _renderdistance)
+    {
+        float t = t9;
+        bestHit.position = ray.origin + t * ray.direction;
+        bestHit.distance = distance(CamPos, bestHit.position);
+
+        // scale back to local from world space
+        Vcoord = Vcoord - _ChunkPos * _ChunkSize;
+        bestHit.normal = VoxelNormal(bestHit.position, Vcoord);
+
+        // set lighting data for each voxel type
+        if (type == 1)
+        {
+            bestHit.albedo = float3(82,41,0) / 255;
+            bestHit.specular = 0.0f;
+        }
+        else if (type == 2)
+        {
+            bestHit.albedo = float3(30,180,30) / 255;
+            bestHit.specular = 0.0f;
+        }
+        else
+        {
+            bestHit.albedo = float3(0, 0, 0);
+            bestHit.specular = 0;
+        }
+    }
+}
+
+// does ray intersect a grid (grid is practically a chunk), then return the grids coord?
+float3 GridAABB(Ray ray, float3 min, float3 max)
+{
+    float t1 = (min.x - ray.origin.x) / ray.direction.x;
+    float t2 = (min.x + _ChunkSize - ray.origin.x) / ray.direction.x;
+    float t3 = (min.y - ray.origin.y) / ray.direction.y;
+    float t4 = (min.y + _ChunkSize - ray.origin.y) / ray.direction.y;
+    float t5 = (min.z - ray.origin.z) / ray.direction.z;
+    float t6 = (min.z + _ChunkSize - ray.origin.z) / ray.direction.z;
+    float aMin = t1 < t2 ? t1 : t2;
+    float bMin = t3 < t4 ? t3 : t4;
+    float cMin = t5 < t6 ? t5 : t6;
+    float aMax = t1 > t2 ? t1 : t2;
+    float bMax = t3 > t4 ? t3 : t4;
+    float cMax = t5 > t6 ? t5 : t6;
+    float fMax = aMin > bMin ? aMin : bMin;
+    float fMin = aMax < bMax ? aMax : bMax;
+    float t7 = fMax > cMin ? fMax : cMin;
+    float t8 = fMin < cMax ? fMin : cMax;
+    float t9 = (t8 < 0 || t7 > t8) ? -1 : t7;
+
+    // intersection found, pass on infomation
+    if (t9 > 0 && t9 < _renderdistance)
+    {
+        float t = t9;
+        return ray.origin + t * ray.direction;
+    }
+    else
+    {
+        return ray.origin;
+    }
+}
+
+// traverse ray through grid until ray hits a voxel, if so then call the VoxelAABB() which then sets the shading properties
+RayHit TraceGrid(Ray ray)
+{
+    RayHit bestHit = CreateRayHit();
+    float3 gridMax = float3(_ChunkPos.x * _ChunkSize + _ChunkSize, _ChunkPos.y * _ChunkSize + _ChunkSize, _ChunkPos.z * _ChunkSize + _ChunkSize);
+    float3 gridMin = float3(_ChunkPos.x * _ChunkSize, _ChunkPos.y * _ChunkSize, _ChunkPos.z * _ChunkSize);
+    float3 rayOrigin = GridAABB(ray, gridMin, gridMax);
+    float3 gridDimension = float3(gridMax - gridMin);
+    float3 rayDirection = ray.direction;
+    float3 cellDimension = float3(1, 1, 1);
+    float3 deltaT, nextCrossingT;
+    float3 rayOrigGrid = rayOrigin - gridMin;
+    float t_x, t_y, t_z;
+
+    // initializing values
+    if (rayDirection[0] < 0)
+    {
+        deltaT[0] = -cellDimension[0] / rayDirection[0];
+        t_x = (floor(rayOrigGrid[0] / cellDimension[0]) * cellDimension[0]- rayOrigGrid[0]) / rayDirection[0];
+    }
+    else 
+    {
+        deltaT[0] = cellDimension[0] / rayDirection[0];
+        t_x = ((floor(rayOrigGrid[0] / cellDimension[0]) + 1) * cellDimension[0] - rayOrigGrid[0]) / rayDirection[0];
+    }
+    if (rayDirection[1] < 0) 
+    {
+        deltaT[1] = -cellDimension[1] / rayDirection[1];
+        t_y = (floor(rayOrigGrid[1] / cellDimension[1]) * cellDimension[1] - rayOrigGrid[1]) / rayDirection[1];
+    }
+    else 
+    {
+        deltaT[1] = cellDimension[1] / rayDirection[1];
+        t_y = ((floor(rayOrigGrid[1] / cellDimension[1]) + 1) * cellDimension[1] - rayOrigGrid[1]) / rayDirection[1];
+    }
+    if (rayDirection[2] < 0)
+    {
+        deltaT[2] = -cellDimension[2] / rayDirection[2];
+        t_z = (floor(rayOrigGrid[2] / cellDimension[2]) * cellDimension[2] - rayOrigGrid[2]) / rayDirection[2];
+    }
+    else
+    {
+        deltaT[2] = cellDimension[2] / rayDirection[2];
+        t_z = ((floor(rayOrigGrid[2] / cellDimension[2]) + 1) * cellDimension[2] - rayOrigGrid[2]) / rayDirection[2];
+    }
+
+    float t = 0;
+    int3 cellIndex = floor(rayOrigGrid);
+    while (1)
+    {
+        // if voxel is found
+        half color = GetVoxelDataAtVoxelCoord(cellIndex);
+        if (color > 0)
+        {
+            VoxelAABB(ray, bestHit, cellIndex, color, gridMin);
+            break;
+        }
+
+        // traverse grid
+        if (t_x < t_y)
+        {
+            if (t_x < t_z)
+            {
+                t = t_x; // current t, next intersection with cell along ray 
+                t_x += deltaT[0]; // increment, next crossing along x 
+                if (rayDirection[0] < 0)
+                    cellIndex[0] -= 1;
+                else
+                    cellIndex[0] += 1;
+            }
+            else
+            {
+                t = t_z; // current t, next intersection with cell along ray 
+                t_z += deltaT[2]; // increment, next crossing along z
+                if (rayDirection[2] < 0)
+                    cellIndex[2] -= 1;
+                else
+                    cellIndex[2] += 1;
+            }
+        }
+        else
+        {
+            if (t_y < t_z)
+            {
+                t = t_y;
+                t_y += deltaT[1]; // increment, next crossing along y 
+                if (rayDirection[1] < 0)
+                    cellIndex[1] -= 1;
+                else
+                    cellIndex[1] += 1;
+            }
+            else
+            {
+                t = t_z;
+                t_z += deltaT[2]; // increment, next crossing along z
+                if (rayDirection[2] < 0)
+                    cellIndex[2] -= 1;
+                else
+                    cellIndex[2] += 1;
+            }
+        }
+        
+
+        // if outside grid, break!
+        if (cellIndex[0] < 0 || cellIndex[1] < 0 || cellIndex[2] < 0 || cellIndex[0] > gridDimension[0] - 1 || cellIndex[1] > gridDimension[1] - 1 || cellIndex[2] > gridDimension[2] - 1)
+        {
+            break;
+        }
+    }
+
+    return bestHit;
+}
+
+// return rgb value based on shading properties of the voxel that was hit
+float3 RayTraceShade(inout Ray ray, RayHit hit)
+{
+    if (hit.distance < _renderdistance)
+    {
+        // Reflect the ray and multiply energy with specular reflection
+        ray.origin = hit.position + hit.normal * 0.001f;
+        ray.direction = reflect(ray.direction, hit.normal);
+        ray.energy *= hit.specular;
+
+        // calc diffuse
+        float3 diffuse = max(0.2f, dot(_DirectionalLight.xyz, normalize(hit.normal)));
+
+        //return shaded
+        return hit.albedo * diffuse;
+    }
+    else
+    {
+        
+        // Erase the ray's energy - the sky doesn't reflect anything
+        ray.energy = 0.0f;
+
+        // Sample the skybox and write it
+        float theta = acos(ray.direction.y) / -PI;
+        float phi = atan2(ray.direction.x, -ray.direction.z) / -PI * 0.5f;
+        return _SkyboxTexture.SampleLevel(sampler_SkyboxTexture, float2(phi, theta), 0).xyz * 1;
+    }
+}
+
+// main pixel shader
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    // set _Pixel
+    _Pixel = id.xy;
+
+    // init uv's
+    float2 result_dimensions;
+    Result.GetDimensions(result_dimensions.x, result_dimensions.y);
+    float2 uv0 = float2((_Pixel + int2(0, 0)) / result_dimensions) * 2.0f - 1.0f;
+
+    // calculate new and old depth and pos data
+    float OldDepth = DepthBuffer[id.xy];
+    Ray DepthAndPosRay = CreateCameraRay(uv0);
+    RayHit DepthAndPosRayHit = TraceGrid(DepthAndPosRay);
+    float Depth = 1.000001f - DepthAndPosRayHit.distance / _renderdistance;
+    
+    // check depth buffer
+    if (Depth > OldDepth)
+    {
+        // update depth
+        DepthBuffer[_Pixel] = Depth;
+
+        // init result
+        float3 result = float3(0, 0, 0);
+
+        // init base ray
+        Ray RayTracingRay = CreateCameraRay(uv0);
+        
+        // trace ray for amaunt of ray baunces
+        for (int i = 0; i < (int)_rayBounces; i++)
+        {
+            RayHit hit = TraceGrid(RayTracingRay);
+            result += RayTracingRay.energy * RayTraceShade(RayTracingRay, hit);
+            //result = hit.normal / 2 + 0.5f; //this sets screen rgb values to the normalmap for debugging
+
+            if (!any(RayTracingRay.energy))
+            {
+                break;
+            }
+        }
+
+        // mouse logic
+        float dis = distance(_Pixel, _mousePos);
+        if (dis < 2)
+        {
+            Ray MouseRay = CreateCameraRay(uv0);
+            RayHit hit = TraceGrid(MouseRay);
+            _MouseVoxelCoord[0] = hit.position.x;
+            _MouseVoxelCoord[1] = hit.position.y;
+            _MouseVoxelCoord[2] = hit.position.z;
+        }
+
+        //update pixel
+        Result[id.xy] = float4(result, 1);
+    }
+}
