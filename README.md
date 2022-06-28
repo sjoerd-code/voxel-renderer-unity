@@ -12,5 +12,4 @@ This is a voxel renderer made using Unity. It is capable of rendering voxel data
 - Free Mouse: Hold "Tab"
 
 ## Gallery:
-<img width="765" alt="screenshot2" src="https://user-images.githubusercontent.com/59654421/175697226-d625316d-876c-49c3-afc9-b76ff87a59e8.png">
-<img width="764" alt="screenshot" src="https://user-images.githubusercontent.com/59654421/175697224-dabdd5f2-cd4b-407d-86cf-22957ca19e36.png">
+<img width="671" alt="Screenshot 2022-06-28 163207" src="https://user-images.githubusercontent.com/59654421/176206366-6e69bcfc-b0b9-4327-8927-617cfce5e24c.png">
