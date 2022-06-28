@@ -127,14 +127,38 @@ public class VoxelRenderer : MonoBehaviour
                     int a = x - t;
                     int b = y - t;
                     int c = z - t;
+
                     Vector3Int editpos = new Vector3Int((int)editPos.x, (int)editPos.y, (int)editPos.z);
                     Vector3Int voxelPos = new Vector3Int(editpos.x + a, editpos.y + b, editpos.z + c);
 
                     if (Vector3.Distance(editpos, voxelPos) < radius / 2)
                     {
-                        if (data.GetPixel(voxelPos.x, voxelPos.y, voxelPos.z).r > 0)
+                        if (data.GetPixel(voxelPos.x, voxelPos.y, voxelPos.z).r <= 0)
                         {
-                            voxelsToRemove.Add(new Vector3Int(voxelPos.x, voxelPos.y, voxelPos.z));
+                            if (data.GetPixel(voxelPos.x + 1, voxelPos.y, voxelPos.z).r > 0)
+                            {
+                                voxelsToRemove.Add(new Vector3Int(voxelPos.x + 1, voxelPos.y, voxelPos.z));
+                            }
+                            else if (data.GetPixel(voxelPos.x - 1, voxelPos.y, voxelPos.z).r > 0)
+                            {
+                                voxelsToRemove.Add(new Vector3Int(voxelPos.x - 1, voxelPos.y, voxelPos.z));
+                            }
+                            else if (data.GetPixel(voxelPos.x, voxelPos.y + 1, voxelPos.z).r > 0)
+                            {
+                                voxelsToRemove.Add(new Vector3Int(voxelPos.x, voxelPos.y + 1, voxelPos.z));
+                            }
+                            else if (data.GetPixel(voxelPos.x, voxelPos.y - 1, voxelPos.z).r > 0)
+                            {
+                                voxelsToRemove.Add(new Vector3Int(voxelPos.x, voxelPos.y - 1, voxelPos.z));
+                            }
+                            else if (data.GetPixel(voxelPos.x, voxelPos.y, voxelPos.z + 1).r > 0)
+                            {
+                                voxelsToRemove.Add(new Vector3Int(voxelPos.x, voxelPos.y, voxelPos.z + 1));
+                            }
+                            else if (data.GetPixel(voxelPos.x, voxelPos.y, voxelPos.z - 1).r > 0)
+                            {
+                                voxelsToRemove.Add(new Vector3Int(voxelPos.x, voxelPos.y, voxelPos.z - 1));
+                            }
                         }
                     }
                 }
